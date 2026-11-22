@@ -9,6 +9,8 @@ command in the given folder. Every other MCP message is passed through as-is.
 Standard library only. Messages are newline-delimited JSON-RPC over stdio.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -145,8 +147,14 @@ class Proxy:
         self.child: Child | None = None
         self.child_lock = threading.Lock()
         self.client_initialize_params: dict | None = None
+        if project is None and (pathlib.Path.cwd() / "gradlew").is_file():
+            project = str(pathlib.Path.cwd())  # started inside a Gradle project: use it
         self.startup_project = project
         self.startup_task = task
+        self.startup_failure: str | None = None
+        self.startup_finished = threading.Event()
+        if project is None:
+            self.startup_finished.set()
         self.child_tools = self.read_cached_tools()
 
     # Tool list -----------------------------------------------------------
@@ -203,7 +211,10 @@ class Proxy:
         try:
             self.use_project(self.startup_project, self.startup_task)
         except Exception as startup_failure:
-            log(f"could not start in {self.startup_project}: {startup_failure}")
+            self.startup_failure = f"could not start in {self.startup_project}: {startup_failure}"
+            log(self.startup_failure)
+        finally:
+            self.startup_finished.set()
 
     # Requests from the client -------------------------------------------
 
@@ -230,15 +241,27 @@ class Proxy:
             self.upstream.reply(request_id, {"tools": [USE_PROJECT_TOOL, *self.child_tools]})
         elif method == "tools/call" and (message.get("params") or {}).get("name") == "use_project":
             threading.Thread(target=self.call_use_project, args=(message,), daemon=True).start()
-        elif self.child is not None and self.child.process.poll() is None:
-            self.child.send(message)
-        elif method == "tools/call":
-            self.upstream.reply(request_id, {
-                "content": [{"type": "text", "text": "No project selected, or its MCP server exited: call use_project first."}],
+        elif self.startup_finished.is_set():
+            self.forward_to_child(message)
+        else:
+            threading.Thread(target=self.forward_to_child, args=(message,), daemon=True).start()
+
+    def forward_to_child(self, message: dict) -> None:
+        """Passes a message on; waits first while the startup project is still starting."""
+        self.startup_finished.wait(timeout=CHILD_START_TIMEOUT_SECONDS)
+        child = self.child
+        if child is not None and child.process.poll() is None:
+            child.send(message)
+            return
+        method = message.get("method")
+        reason = self.startup_failure or "No project selected, or its MCP server exited"
+        if method == "tools/call":
+            self.upstream.reply(message.get("id"), {
+                "content": [{"type": "text", "text": f"{reason}: call use_project."}],
                 "isError": True,
             })
-        elif request_id is not None:
-            self.upstream.error(request_id, -32601, f"{method} needs a project: call use_project first")
+        elif message.get("id") is not None:
+            self.upstream.error(message["id"], -32601, f"{method} needs a project: {reason}: call use_project")
 
     def call_use_project(self, message: dict) -> None:
         arguments = message["params"].get("arguments") or {}

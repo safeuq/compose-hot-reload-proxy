@@ -1,4 +1,4 @@
-"""Runs the proxy against a fake `gradlew` (a tiny MCP server) in two folders.
+"""Runs the proxy against a fake `gradlew` (a tiny MCP server) in two folders, and started inside one.
 
 python3 -m unittest test_compose_hot_reload_proxy.py
 """
@@ -48,9 +48,13 @@ class ProxyTest(unittest.TestCase):
             gradlew.write_text(FAKE_GRADLEW.format(python=sys.executable))
             gradlew.chmod(0o755)
             self.projects.append(str(project.resolve()))
-        environment = dict(os.environ, XDG_CACHE_HOME=str(root / "cache"))
+        self.environment = dict(os.environ, XDG_CACHE_HOME=str(root / "cache"))
+        self.start_proxy(working_folder=str(root))
+
+    def start_proxy(self, working_folder):
         self.proxy = subprocess.Popen([sys.executable, str(PROXY)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL, text=True, bufsize=1, env=environment)
+                                      stderr=subprocess.DEVNULL, text=True, bufsize=1, env=self.environment,
+                                      cwd=working_folder)
         self.incoming = queue.Queue()
         threading.Thread(target=lambda: [self.incoming.put(json.loads(line)) for line in self.proxy.stdout], daemon=True).start()
         self.next_id = 0
@@ -86,10 +90,21 @@ class ProxyTest(unittest.TestCase):
         answer, _ = self.receive(self.send("tools/list"))
         return [tool["name"] for tool in answer["result"]["tools"]]
 
-    def test_switches_between_projects(self):
+    def initialize(self):
         initialize, _ = self.receive(self.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}}))
         self.assertTrue(initialize["result"]["capabilities"]["tools"]["listChanged"])
         self.send("notifications/initialized", notification=True)
+
+    def test_uses_the_gradle_project_it_was_started_in(self):
+        self.proxy.stdin.close()
+        self.proxy.wait(timeout=10)
+        self.start_proxy(working_folder=self.projects[0])
+        self.initialize()
+        answer, _ = self.call("status")  # sent at once: waits for the start instead of failing
+        self.assertEqual(answer["content"][0]["text"], f"{self.projects[0]} hotMcpServer")
+
+    def test_switches_between_projects(self):
+        self.initialize()
 
         self.assertEqual(self.tool_names(), ["use_project"])
         before, _ = self.call("status")

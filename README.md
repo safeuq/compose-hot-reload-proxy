@@ -10,7 +10,7 @@ This proxy is registered once and works from any folder. It adds one tool, `use_
 | Which project | the folder the MCP client started in | `use_project(path, task)`, any time, as often as needed |
 | Several projects or worktrees | one client session per folder | one registration; each session or subagent picks its own folder |
 
-Needs Python 3.10 or newer (standard library only) and a project that applies the Compose Hot Reload Gradle plugin.
+Needs Python 3.9 or newer (standard library only; the macOS built-in `/usr/bin/python3` works) and a project that applies the Compose Hot Reload Gradle plugin.
 
 ## Register
 
@@ -32,11 +32,19 @@ Any other MCP client: a stdio server with that command.
 
 Call `use_project` again to switch to another folder or worktree; the previous server is stopped.
 
-To fix the project from the start instead, pass `--project /work/my-app` (and `--task …`), or set `COMPOSE_HOT_RELOAD_PROJECT` / `COMPOSE_HOT_RELOAD_TASK`.
+Which project is used before any `use_project` call:
+
+| Proxy started with | Project used | Task |
+|---|---|---|
+| `--project /work/my-app` (or `COMPOSE_HOT_RELOAD_PROJECT`) | `/work/my-app` | `--task` / `COMPOSE_HOT_RELOAD_TASK`, default `hotMcpServer` |
+| nothing, in a folder with `gradlew` (Claude Code started inside a project) | that folder | same |
+| nothing, elsewhere | none until `use_project` | |
+
+Gradle runs a task named without a module path, like `hotMcpServer`, in every module that has it, so the default also works when the plugin is applied in a module.
 
 ## How it works
 
-- Until a project is chosen, the tool list is `use_project` plus the plugin's tools remembered from the last run (`~/.cache/compose-hot-reload-proxy/tools.json`). Calling a plugin tool then answers "call use_project first".
+- The tool list is `use_project` plus the plugin's tools remembered from the last run (`~/.cache/compose-hot-reload-proxy/tools.json`), so they are there before the server has started. A call that arrives while the starting project is still starting waits for it. With no project at all, a plugin tool answers "call use_project".
 - `use_project` starts `./gradlew --no-daemon --quiet --console=plain <task>` in the folder, runs the MCP handshake with it, and reads its tools. When they differ from the remembered list, the proxy sends `notifications/tools/list_changed`, and the client fetches the list again.
 - The first start in a folder can take minutes (Gradle downloads and compiles); later starts take seconds. The proxy waits up to 10 minutes.
 - Gradle's and the server's own output go to the proxy's stderr.
